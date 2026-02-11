@@ -1,0 +1,325 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Messages - Chat App</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="style.css">
+</head>
+
+<body>
+    <!-- Navbar -->
+    <nav class="x-navbar">
+        <div class="nav-brand">
+            <img src="logo.png" alt="Logo" width="32" height="32" style="border-radius:50%;">
+            <span>Messages</span>
+        </div>
+        <div class="nav-actions">
+            <span class="user-badge" id="welcomeUser"></span>
+            <button class="nav-btn" id="themeToggle" title="Toggle theme">🌙</button>
+            <button class="btn-logout" id="logoutBtn">Log out</button>
+        </div>
+    </nav>
+
+    <div class="container-fluid chat-container">
+        <div class="row h-100 g-0">
+            <!-- Sidebar -->
+            <div class="col-md-3 sidebar">
+                <div class="sidebar-heading">Rooms</div>
+                <div id="roomList"></div>
+                <button class="leave-btn d-none" id="leaveRoomBtn">Leave Room</button>
+
+                <div class="users-heading">People</div>
+                <div id="userList">
+                    <p class="text-muted small px-3">Join a room to see people</p>
+                </div>
+            </div>
+
+            <!-- Chat Area -->
+            <div class="col-md-9 chat-main">
+                <!-- Chat header -->
+                <div class="chat-header">
+                    <div>
+                        <div class="chat-header-title" id="chatTitle">Select a room</div>
+                        <div class="chat-header-sub" id="chatSubtitle">Pick a room from the sidebar to start messaging
+                        </div>
+                    </div>
+                    <button class="back-btn d-none" id="backToRoom">← Back</button>
+                </div>
+
+                <!-- Messages -->
+                <div class="chat-messages" id="chatMessages">
+                    <div class="welcome-state">
+                        <img src="logo.png" alt="Logo" width="64" height="64"
+                            style="border-radius:50%; margin-bottom:20px;">
+                        <h4>Welcome to Chat</h4>
+                        <p>Join a room from the sidebar to start chatting with others in real time.</p>
+                    </div>
+                </div>
+
+                <!-- Typing indicator -->
+                <div class="typing-indicator d-none" id="typingIndicator">
+                    <span id="typingText"></span>
+                    <span class="dots"><span></span><span></span><span></span></span>
+                </div>
+
+                <!-- Message input -->
+                <div class="chat-input d-none" id="chatInputArea">
+                    <form id="messageForm">
+                        <input type="text" class="form-control" id="messageInput" placeholder="Start a new message"
+                            autocomplete="off">
+                        <button type="submit" class="btn-send" title="Send">➤</button>
+                    </form>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
+    <script src="/socket.io/socket.io.js"></script>
+    <script>
+        // Theme
+        function loadTheme() {
+            const t = localStorage.getItem('chat_theme') || 'light';
+            document.documentElement.setAttribute('data-theme', t);
+            $('#themeToggle').text(t === 'dark' ? '☀️' : '🌙');
+        }
+        loadTheme();
+        $('#themeToggle').on('click', function () {
+            const next = document.documentElement.getAttribute('data-theme') === 'dark' ? 'light' : 'dark';
+            document.documentElement.setAttribute('data-theme', next);
+            localStorage.setItem('chat_theme', next);
+            $(this).text(next === 'dark' ? '☀️' : '🌙');
+        });
+
+        $(document).ready(function () {
+            const username = localStorage.getItem('chat_username');
+            if (!username) { window.location.href = 'login.html'; return; }
+            $('#welcomeUser').text('@' + username);
+
+            const socket = io();
+            let currentRoom = null;
+            let privateChatUser = null;
+            let typingTimeout = null;
+
+            const roomIcons = {
+                'devops': '⚙️',
+                'cloud computing': '☁️',
+                'covid19': '🦠',
+                'sports': '⚽',
+                'nodeJS': '🟢'
+            };
+
+            socket.emit('registerUser', username);
+
+            // Load rooms
+            fetch('/api/rooms')
+                .then(res => res.json())
+                .then(rooms => {
+                    rooms.forEach(room => {
+                        const icon = roomIcons[room] || '💬';
+                        $('#roomList').append(
+                            `<button class="room-btn" data-room="${room}"><span class="room-icon">${icon}</span> ${room}</button>`
+                        );
+                    });
+                });
+
+            // Join room
+            $(document).on('click', '.room-btn', function () {
+                const room = $(this).data('room');
+                currentRoom = room;
+                privateChatUser = null;
+                socket.emit('joinRoom', room);
+
+                $('.room-btn').removeClass('active');
+                $(this).addClass('active');
+                $('#chatTitle').text(room);
+                $('#chatSubtitle').text('Group conversation');
+                $('#chatMessages').html('');
+                $('#chatInputArea').removeClass('d-none');
+                $('#leaveRoomBtn').removeClass('d-none');
+                $('#backToRoom').addClass('d-none');
+                $('#messageInput').attr('placeholder', 'Start a new message');
+
+                fetch('/api/messages/room/' + encodeURIComponent(room))
+                    .then(res => res.json())
+                    .then(messages => {
+                        messages.forEach(msg => appendMessage(msg.from_user, msg.message, msg.date_sent));
+                        scrollToBottom();
+                    });
+            });
+
+            // Leave room
+            $('#leaveRoomBtn').on('click', function () {
+                socket.emit('leaveRoom');
+                currentRoom = null;
+                privateChatUser = null;
+                $('.room-btn').removeClass('active');
+                $('#chatTitle').text('Select a room');
+                $('#chatSubtitle').text('Pick a room from the sidebar to start messaging');
+                $('#chatMessages').html(`
+          <div class="welcome-state">
+            <img src="logo.png" alt="Logo" width="64" height="64" style="border-radius:50%; margin-bottom:20px;">
+            <h4>Welcome to Chat</h4>
+            <p>Join a room from the sidebar to start chatting with others in real time.</p>
+          </div>`);
+                $('#chatInputArea').addClass('d-none');
+                $('#leaveRoomBtn').addClass('d-none');
+                $('#userList').html('<p class="text-muted small px-3">Join a room to see people</p>');
+            });
+
+            // Private chat
+            $(document).on('click', '.user-item:not(.me)', function () {
+                const targetUser = $(this).data('username');
+                privateChatUser = targetUser;
+                $('#chatTitle').text(targetUser);
+                $('#chatSubtitle').text('Private conversation');
+                $('#backToRoom').removeClass('d-none');
+                $('#chatMessages').html('');
+                $('#messageInput').attr('placeholder', 'Message @' + targetUser);
+
+                fetch('/api/messages/private/' + encodeURIComponent(username) + '/' + encodeURIComponent(targetUser))
+                    .then(res => res.json())
+                    .then(messages => {
+                        messages.forEach(msg => appendMessage(msg.from_user, msg.message, msg.date_sent));
+                        scrollToBottom();
+                    });
+            });
+
+            // Back to room
+            $('#backToRoom').on('click', function () {
+                privateChatUser = null;
+                $('#chatTitle').text(currentRoom);
+                $('#chatSubtitle').text('Group conversation');
+                $('#backToRoom').addClass('d-none');
+                $('#chatMessages').html('');
+                $('#messageInput').attr('placeholder', 'Start a new message');
+
+                fetch('/api/messages/room/' + encodeURIComponent(currentRoom))
+                    .then(res => res.json())
+                    .then(messages => {
+                        messages.forEach(msg => appendMessage(msg.from_user, msg.message, msg.date_sent));
+                        scrollToBottom();
+                    });
+            });
+
+            // Send message
+            $('#messageForm').on('submit', function (e) {
+                e.preventDefault();
+                const message = $('#messageInput').val().trim();
+                if (!message) return;
+
+                if (privateChatUser) {
+                    socket.emit('privateMessage', { to_user: privateChatUser, message });
+                } else if (currentRoom) {
+                    socket.emit('groupMessage', { message });
+                }
+
+                $('#messageInput').val('');
+                socket.emit('stopTyping', privateChatUser ? { to_user: privateChatUser } : null);
+            });
+
+            // Typing
+            $('#messageInput').on('input', function () {
+                const data = privateChatUser ? { to_user: privateChatUser } : {};
+                socket.emit('typing', data);
+                clearTimeout(typingTimeout);
+                typingTimeout = setTimeout(() => { socket.emit('stopTyping', data); }, 2000);
+            });
+
+            // =================== SOCKET EVENTS ===================
+
+            socket.on('roomMessage', function (data) {
+                if (!privateChatUser) {
+                    appendMessage(data.from_user, data.message, data.date_sent);
+                    scrollToBottom();
+                }
+            });
+
+            socket.on('privateMessage', function (data) {
+                if (privateChatUser === data.from_user || privateChatUser === data.to_user) {
+                    if (data.from_user === username && privateChatUser === data.to_user) {
+                        appendMessage(data.from_user, data.message, data.date_sent);
+                    } else if (data.from_user !== username) {
+                        appendMessage(data.from_user, data.message, data.date_sent);
+                    }
+                    scrollToBottom();
+                } else if (data.from_user !== username) {
+                    showNotification('@' + data.from_user + ' sent you a message');
+                }
+            });
+
+            socket.on('updateUsers', function (users) {
+                $('#userList').html('');
+                users.forEach(u => {
+                    const isMe = u === username;
+                    const initial = u.charAt(0).toUpperCase();
+                    $('#userList').append(`
+            <div class="user-item ${isMe ? 'me' : ''}" data-username="${u}">
+              <div class="user-avatar">${initial}</div>
+              <span>${isMe ? '@' + u + ' (you)' : '@' + u}</span>
+              <span class="online-dot"></span>
+            </div>
+          `);
+                });
+            });
+
+            socket.on('typing', function (data) {
+                $('#typingIndicator').removeClass('d-none');
+                $('#typingText').text(data.from_user + ' is typing ');
+            });
+
+            socket.on('stopTyping', function () {
+                $('#typingIndicator').addClass('d-none');
+            });
+
+            // Logout
+            $('#logoutBtn').on('click', function () {
+                localStorage.removeItem('chat_username');
+                localStorage.removeItem('chat_firstname');
+                window.location.href = 'login.html';
+            });
+
+            // =================== HELPERS ===================
+
+            function appendMessage(from, message, date) {
+                const time = new Date(date).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+                const isMe = from === username;
+                const isSystem = from === 'System';
+
+                let html;
+                if (isSystem) {
+                    html = `<div class="system-msg"><small>${message}</small></div>`;
+                } else {
+                    html = `
+            <div class="message ${isMe ? 'message-sent' : 'message-received'}">
+              <div class="message-header"><strong>${isMe ? 'You' : '@' + from}</strong> · <small>${time}</small></div>
+              <div class="message-body">${escapeHtml(message)}</div>
+            </div>`;
+                }
+                $('#chatMessages').append(html);
+            }
+
+            function scrollToBottom() {
+                const el = document.getElementById('chatMessages');
+                el.scrollTop = el.scrollHeight;
+            }
+
+            function escapeHtml(text) {
+                const div = document.createElement('div');
+                div.textContent = text;
+                return div.innerHTML;
+            }
+
+            function showNotification(msg) {
+                const toast = $(`<div class="notification">${msg}</div>`);
+                $('body').append(toast);
+                setTimeout(() => toast.fadeOut(400, function () { $(this).remove(); }), 3000);
+            }
+        });
+    </script>
+</body>
+
+</html>
